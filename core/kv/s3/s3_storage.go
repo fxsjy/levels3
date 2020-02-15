@@ -134,6 +134,9 @@ func (ms *S3Storage) List(ft storage.FileType) ([]storage.FileDesc, error) {
 	}
 	for fname, _ := range ms.ramFiles {
 		fd, _ := fsParseName(fname)
+		if fd.Type&ft == 0 {
+			continue
+		}
 		if !existMap[fname] {
 			fds = append(fds, fd)
 		}

@@ -9,7 +9,7 @@ import (
 
 func main() {
 	opt := levels3.OpenOption{
-		Bucket: "sjy3",
+		Bucket: "sjy4",
 		Ak:     "",
 		Sk:     "",
 		Region: "ap-northeast-1",
