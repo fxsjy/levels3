@@ -20,6 +20,7 @@ var errFileOpen = errors.New("leveldb/storage: file still open")
 
 type OpenOption struct {
 	Bucket   string
+	Path     string
 	Ak       string
 	Sk       string
 	Region   string

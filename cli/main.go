@@ -9,7 +9,8 @@ import (
 
 func main() {
 	opt := levels3.OpenOption{
-		Bucket: "sjy4",
+		Bucket: "sjy5",
+		Path:   "mydb1/sub2",
 		Ak:     "",
 		Sk:     "",
 		Region: "ap-northeast-1",
@@ -28,7 +29,7 @@ func main() {
 	for iter.Next() {
 		fmt.Println(string(iter.Key()), string(iter.Value()))
 	}
-	for j := 1; j <= 10; j++ {
+	for j := 1; j <= 1; j++ {
 		for i := 1; i <= 10000; i++ {
 			key := fmt.Sprintf("key_%d_%d", j, i)
 			err = db.Put([]byte(key), []byte("WORLD"), nil)

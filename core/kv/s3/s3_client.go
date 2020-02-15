@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/syndtr/goleveldb/leveldb/storage"
 	"io/ioutil"
+	"path"
 )
 
 type S3Client struct {
@@ -48,13 +49,14 @@ func GetS3Client(opt OpenOption) (*S3Client, error) {
 			return nil, err
 		}
 	}
+	opt.Path = path.Clean(opt.Path)
 	return &S3Client{s3Store: client, opt: opt}, nil
 }
 
 func (client *S3Client) PutBytes(key string, data []byte) error {
 	_, err := client.s3Store.PutObject(&s3.PutObjectInput{
 		Bucket: aws.String(client.opt.Bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(client.opt.Path + "/" + key),
 		Body:   bytes.NewReader(data),
 	})
 	return err
@@ -63,7 +65,7 @@ func (client *S3Client) PutBytes(key string, data []byte) error {
 func (client *S3Client) GetBytes(key string) ([]byte, error) {
 	rsps, err := client.s3Store.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(client.opt.Bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(client.opt.Path + "/" + key),
 	})
 	if err != nil {
 		return nil, err
@@ -75,7 +77,7 @@ func (client *S3Client) GetBytes(key string) ([]byte, error) {
 func (client *S3Client) Remove(key string) error {
 	_, err := client.s3Store.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: aws.String(client.opt.Bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(client.opt.Path + "/" + key),
 	})
 	if err != nil {
 		return err
@@ -86,11 +88,15 @@ func (client *S3Client) Remove(key string) error {
 func (client *S3Client) List() ([]storage.FileDesc, error) {
 	files := []storage.FileDesc{}
 	err := client.s3Store.ListObjectsPages(&s3.ListObjectsInput{
-		Bucket: aws.String(client.opt.Bucket)},
+		Bucket:    aws.String(client.opt.Bucket),
+		Prefix:    aws.String(client.opt.Path + "/"),
+		Delimiter: aws.String("/"),
+	},
 		func(p *s3.ListObjectsOutput, last bool) (shouldContinue bool) {
 			for _, obj := range p.Contents {
-				fName := obj.Key
-				fd, pOK := fsParseName(*fName)
+				fullName := *obj.Key
+				_, absName := path.Split(fullName)
+				fd, pOK := fsParseName(absName)
 				if pOK {
 					files = append(files, fd)
 				}
