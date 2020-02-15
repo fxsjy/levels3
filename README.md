@@ -5,6 +5,7 @@ Code Example:
 ```
 opt := levels3.OpenOption{
   Bucket: "sjy3",
+  Path: "data/hello",
   Ak:     "",
   Sk:     "",
   Region: "ap-northeast-1",
