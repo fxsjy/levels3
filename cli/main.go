@@ -10,7 +10,7 @@ import (
 func main() {
 	opt := levels3.OpenOption{
 		Bucket: "sjy5",
-		Path:   "mydb1/sub2",
+		Path:   "mydb1/sub12",
 		Ak:     "",
 		Sk:     "",
 		Region: "ap-northeast-1",
@@ -18,7 +18,6 @@ func main() {
 	st, err := levels3.NewS3Storage(opt)
 	if err != nil {
 		panic(err)
-		fmt.Println(st)
 	}
 	db, err := leveldb.Open(st, nil)
 	defer db.Close()
@@ -29,7 +28,7 @@ func main() {
 	for iter.Next() {
 		fmt.Println(string(iter.Key()), string(iter.Value()))
 	}
-	for j := 1; j <= 1; j++ {
+	for j := 1; j <= 2; j++ {
 		for i := 1; i <= 10000; i++ {
 			key := fmt.Sprintf("key_%d_%d", j, i)
 			err = db.Put([]byte(key), []byte("WORLD"), nil)

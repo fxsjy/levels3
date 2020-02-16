@@ -95,8 +95,8 @@ func (client *S3Client) List() ([]storage.FileDesc, error) {
 		func(p *s3.ListObjectsOutput, last bool) (shouldContinue bool) {
 			for _, obj := range p.Contents {
 				fullName := *obj.Key
-				_, absName := path.Split(fullName)
-				fd, pOK := fsParseName(absName)
+				_, relName := path.Split(fullName)
+				fd, pOK := fsParseName(relName)
 				if pOK {
 					files = append(files, fd)
 				}

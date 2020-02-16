@@ -11,20 +11,23 @@ import (
 	"errors"
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb/storage"
+	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"sync"
 )
 
 var errFileOpen = errors.New("leveldb/storage: file still open")
 
 type OpenOption struct {
-	Bucket   string
-	Path     string
-	Ak       string
-	Sk       string
-	Region   string
-	Endpoint string
+	Bucket        string
+	Path          string
+	Ak            string
+	Sk            string
+	Region        string
+	Endpoint      string
+	LocalCacheDir string
 }
 
 type S3StorageLock struct {
@@ -46,6 +49,7 @@ type S3Storage struct {
 	meta     storage.FileDesc
 	objStore *S3Client
 	ramFiles map[string]*memFile
+	opt      OpenOption
 }
 
 // NewS3Storage returns a new s3-backed storage implementation.
@@ -54,9 +58,31 @@ func NewS3Storage(opt OpenOption) (storage.Storage, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opt.LocalCacheDir != "" {
+		err := os.MkdirAll(opt.LocalCacheDir, 0755)
+		if err != nil {
+			return nil, err
+		}
+		logFiles, err := ioutil.ReadDir(opt.LocalCacheDir)
+		for _, logF := range logFiles {
+			fullName := path.Join(opt.LocalCacheDir, logF.Name())
+			content, err := ioutil.ReadFile(fullName)
+			if err != nil {
+				return nil, err
+			}
+			log.Println("Upload", fullName)
+			fd, _ := fsParseName(logF.Name())
+			err = s3Client.PutBytes(fd.String(), content)
+			if err != nil {
+				return nil, err
+			}
+			os.Remove(fullName)
+		}
+	}
 	return &S3Storage{
 		objStore: s3Client,
 		ramFiles: map[string]*memFile{},
+		opt:      opt,
 	}, nil
 }
 
@@ -175,9 +201,17 @@ func (ms *S3Storage) Create(fd storage.FileDesc) (storage.Writer, error) {
 	m := &memFile{}
 	m.open = true
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	ms.ramFiles[fd.String()] = m
-	ms.mu.Unlock()
-	return &memWriter{memFile: m, ms: ms, fd: fd}, nil
+	var cacheFile *os.File
+	if fd.Type == storage.TypeJournal && ms.opt.LocalCacheDir != "" {
+		var err error
+		cacheFile, err = os.Create(path.Join(ms.opt.LocalCacheDir, fd.String()))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &memWriter{memFile: m, ms: ms, fd: fd, cacheFile: cacheFile}, nil
 }
 
 func (ms *S3Storage) Remove(fd storage.FileDesc) error {
@@ -238,9 +272,10 @@ func (mr *memReader) Close() error {
 
 type memWriter struct {
 	*memFile
-	ms     *S3Storage
-	fd     storage.FileDesc
-	closed bool
+	ms        *S3Storage
+	fd        storage.FileDesc
+	closed    bool
+	cacheFile *os.File
 }
 
 func (mw *memWriter) Sync() error {
@@ -252,6 +287,17 @@ func (mw *memWriter) Sync() error {
 		}
 	}
 	return nil
+}
+
+func (mw *memWriter) Write(p []byte) (n int, err error) {
+	n, err = mw.memFile.Write(p)
+	if mw.cacheFile != nil {
+		_, err2 := mw.cacheFile.Write(p)
+		if err2 != nil {
+			return 0, err2
+		}
+	}
+	return n, err
 }
 
 func (mw *memWriter) Close() error {
@@ -266,5 +312,9 @@ func (mw *memWriter) Close() error {
 		return storage.ErrClosed
 	}
 	mw.memFile.open = false
+	if mw.cacheFile != nil {
+		mw.cacheFile.Close()
+		return os.Remove(mw.cacheFile.Name())
+	}
 	return nil
 }
