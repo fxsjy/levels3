@@ -33,12 +33,13 @@ func GetS3Client(opt OpenOption) (*S3Client, error) {
 		Region:      aws.String(opt.Region),
 		DisableSSL:  aws.Bool(false),
 		Credentials: creds,
+		Endpoint:    aws.String(opt.Endpoint),
 	}
 	client := s3.New(session.New(config))
-	testBucket := &s3.GetBucketLocationInput{
+	testBucket := &s3.HeadBucketInput{
 		Bucket: aws.String(opt.Bucket),
 	}
-	_, err = client.GetBucketLocation(testBucket)
+	_, err = client.HeadBucket(testBucket)
 	if err != nil {
 		//try create
 		createBucket := &s3.CreateBucketInput{
