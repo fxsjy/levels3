@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/syndtr/goleveldb/leveldb/storage"
 	"io/ioutil"
 	"log"
@@ -19,6 +20,8 @@ import (
 )
 
 var errFileOpen = errors.New("leveldb/storage: file still open")
+
+const CacheSize = 500
 
 type OpenOption struct {
 	Bucket        string
@@ -48,8 +51,9 @@ type S3Storage struct {
 	slock    *S3StorageLock
 	meta     storage.FileDesc
 	objStore *S3Client
-	ramFiles map[string]*memFile
+	ramFiles *lru.Cache
 	opt      OpenOption
+	wg       *sync.WaitGroup
 }
 
 // NewS3Storage returns a new s3-backed storage implementation.
@@ -59,6 +63,7 @@ func NewS3Storage(opt OpenOption) (storage.Storage, error) {
 		return nil, err
 	}
 	if opt.LocalCacheDir != "" {
+		opt.LocalCacheDir = path.Join(opt.LocalCacheDir, opt.Path)
 		err := os.MkdirAll(opt.LocalCacheDir, 0755)
 		if err != nil {
 			return nil, err
@@ -79,10 +84,12 @@ func NewS3Storage(opt OpenOption) (storage.Storage, error) {
 			os.Remove(fullName)
 		}
 	}
+	ramFileCache, _ := lru.New(CacheSize)
 	return &S3Storage{
 		objStore: s3Client,
-		ramFiles: map[string]*memFile{},
+		ramFiles: ramFileCache,
 		opt:      opt,
+		wg:       &sync.WaitGroup{},
 	}, nil
 }
 
@@ -107,13 +114,9 @@ func (ms *S3Storage) SetMeta(fd storage.FileDesc) error {
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	err := ms.objStore.PutBytes(fd.String(), ms.ramFiles[fd.String()].Bytes())
-	if err != nil {
-		return err
-	}
 	ms.meta = fd
 	metaStr := fmt.Sprintf("%d %d", fd.Type, int64(fd.Num))
-	err = ms.objStore.PutBytes("CURRENT", []byte(metaStr))
+	err := ms.objStore.PutBytes("CURRENT", []byte(metaStr))
 	if err != nil {
 		return err
 	}
@@ -152,19 +155,8 @@ func (ms *S3Storage) List(ft storage.FileType) ([]storage.FileDesc, error) {
 		return nil, err
 	}
 	var fds []storage.FileDesc
-	existMap := map[string]bool{}
 	for _, fd := range fdsAll {
 		if fd.Type&ft != 0 {
-			fds = append(fds, fd)
-			existMap[fd.String()] = true
-		}
-	}
-	for fname, _ := range ms.ramFiles {
-		fd, _ := fsParseName(fname)
-		if fd.Type&ft == 0 {
-			continue
-		}
-		if !existMap[fname] {
 			fds = append(fds, fd)
 		}
 	}
@@ -179,7 +171,8 @@ func (ms *S3Storage) Open(fd storage.FileDesc) (storage.Reader, error) {
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	if mfile, ok := ms.ramFiles[fd.String()]; ok {
+	if mfileObj, ok := ms.ramFiles.Get(fd.String()); ok {
+		mfile := mfileObj.(*memFile)
 		mfile.open = true
 		return &memReader{Reader: bytes.NewReader(mfile.Bytes()), ms: ms, m: mfile, fd: fd}, nil
 	}
@@ -187,9 +180,13 @@ func (ms *S3Storage) Open(fd storage.FileDesc) (storage.Reader, error) {
 	data, err := ms.objStore.GetBytes(fname)
 	if err != nil {
 		return nil, os.ErrNotExist
+		data, err = ioutil.ReadFile(path.Join(ms.opt.LocalCacheDir, fd.String()))
+		if err != nil {
+			return nil, os.ErrNotExist
+		}
 	}
 	m := &memFile{Buffer: *bytes.NewBuffer(data), open: true}
-	ms.ramFiles[fd.String()] = m
+	ms.ramFiles.Add(fd.String(), m)
 	return &memReader{Reader: bytes.NewReader(data), ms: ms, m: m, fd: fd}, nil
 }
 
@@ -202,9 +199,9 @@ func (ms *S3Storage) Create(fd storage.FileDesc) (storage.Writer, error) {
 	m.open = true
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	ms.ramFiles[fd.String()] = m
+	ms.ramFiles.Add(fd.String(), m)
 	var cacheFile *os.File
-	if fd.Type == storage.TypeJournal && ms.opt.LocalCacheDir != "" {
+	if (fd.Type == storage.TypeJournal || fd.Type == storage.TypeManifest || fd.Type == storage.TypeTable) && ms.opt.LocalCacheDir != "" {
 		var err error
 		cacheFile, err = os.Create(path.Join(ms.opt.LocalCacheDir, fd.String()))
 		if err != nil {
@@ -221,11 +218,14 @@ func (ms *S3Storage) Remove(fd storage.FileDesc) error {
 	}
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
-	delete(ms.ramFiles, fd.String())
-	err := ms.objStore.Remove(fd.String())
-	if err != nil {
-		return os.ErrNotExist
-	}
+	ms.ramFiles.Remove(fd.String())
+	os.Remove(path.Join(ms.opt.LocalCacheDir, fd.String()))
+	go func() {
+		err := ms.objStore.Remove(fd.String())
+		if err != nil {
+			return
+		}
+	}()
 	return nil
 }
 
@@ -240,8 +240,9 @@ func (ms *S3Storage) Rename(oldfd, newfd storage.FileDesc) error {
 	return nil
 }
 
-func (*S3Storage) Close() error {
+func (ms *S3Storage) Close() error {
 	log.Println("storage Close")
+	ms.wg.Wait()
 	return nil
 }
 
@@ -266,7 +267,7 @@ func (mr *memReader) Close() error {
 		return storage.ErrClosed
 	}
 	mr.m.open = false
-	delete(mr.ms.ramFiles, mr.fd.String())
+	mr.ms.ramFiles.Remove(mr.fd.String())
 	return nil
 }
 
@@ -280,11 +281,8 @@ type memWriter struct {
 
 func (mw *memWriter) Sync() error {
 	log.Println("writer Sync", mw.fd, "len", mw.memFile.Len())
-	if mw.fd.Type == storage.TypeManifest {
-		err := mw.ms.objStore.PutBytes(mw.fd.String(), mw.memFile.Bytes())
-		if err != nil {
-			return err
-		}
+	if mw.fd.Type == storage.TypeManifest && mw.cacheFile != nil {
+		return mw.cacheFile.Sync()
 	}
 	return nil
 }
@@ -303,18 +301,29 @@ func (mw *memWriter) Write(p []byte) (n int, err error) {
 func (mw *memWriter) Close() error {
 	curLen := mw.memFile.Len()
 	log.Println("writer Close", mw.fd, "len", curLen)
-	fname := mw.fd.String()
-	err := mw.ms.objStore.PutBytes(fname, mw.memFile.Bytes())
-	if err != nil {
-		return err
+	if mw.cacheFile == nil {
+		return nil
 	}
-	if mw.closed {
-		return storage.ErrClosed
-	}
-	mw.memFile.open = false
-	if mw.cacheFile != nil {
-		mw.cacheFile.Close()
-		return os.Remove(mw.cacheFile.Name())
-	}
-	return nil
+	mw.ms.wg.Add(1)
+	tErr := mw.cacheFile.Close()
+	go func() {
+		defer mw.ms.wg.Done()
+		if mw.fd.Type == storage.TypeJournal {
+			return
+		}
+		fname := mw.fd.String()
+		err := mw.ms.objStore.PutBytes(fname, mw.memFile.Bytes())
+		if err != nil {
+			log.Println("Close", err)
+			return
+		}
+		if mw.closed {
+			return
+		}
+		mw.memFile.open = false
+		if mw.cacheFile != nil {
+			os.Remove(mw.cacheFile.Name())
+		}
+	}()
+	return tErr
 }
