@@ -83,6 +83,8 @@ func NewS3Storage(opt OpenOption) (storage.Storage, error) {
 			}
 			os.Remove(fullName)
 		}
+	} else {
+		return nil, errors.New("need a local cache dir for s3 storage")
 	}
 	ramFileCache, _ := lru.New(CacheSize)
 	return &S3Storage{
@@ -275,7 +277,6 @@ type memWriter struct {
 	*memFile
 	ms        *S3Storage
 	fd        storage.FileDesc
-	closed    bool
 	cacheFile *os.File
 }
 
@@ -317,11 +318,15 @@ func (mw *memWriter) Close() error {
 			log.Println("Close", err)
 			return
 		}
-		if mw.closed {
-			return
-		}
 		mw.memFile.open = false
 		if mw.cacheFile != nil {
+			if _, fErr := os.Stat(mw.cacheFile.Name()); os.IsNotExist(fErr) {
+				err := mw.ms.objStore.Remove(fname)
+				if err != nil {
+					log.Println("remove dup err", err)
+				}
+				return
+			}
 			os.Remove(mw.cacheFile.Name())
 		}
 	}()
