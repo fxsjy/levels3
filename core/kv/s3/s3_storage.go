@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"sync"
+	"time"
 )
 
 var errFileOpen = errors.New("leveldb/storage: file still open")
@@ -181,7 +182,6 @@ func (ms *S3Storage) Open(fd storage.FileDesc) (storage.Reader, error) {
 	fname := fd.String()
 	data, err := ms.objStore.GetBytes(fname)
 	if err != nil {
-		return nil, os.ErrNotExist
 		data, err = ioutil.ReadFile(path.Join(ms.opt.LocalCacheDir, fd.String()))
 		if err != nil {
 			return nil, os.ErrNotExist
@@ -313,9 +313,17 @@ func (mw *memWriter) Close() error {
 			return
 		}
 		fname := mw.fd.String()
-		err := mw.ms.objStore.PutBytes(fname, mw.memFile.Bytes())
+		var err error
+		for r := 0; r < 3; r++ {
+			err = mw.ms.objStore.PutBytes(fname, mw.memFile.Bytes())
+			if err != nil {
+				log.Println("Close err, try again", err)
+				time.Sleep(2 * time.Second)
+			} else {
+				break
+			}
+		}
 		if err != nil {
-			log.Println("Close", err)
 			return
 		}
 		mw.memFile.open = false
