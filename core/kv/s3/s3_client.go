@@ -41,14 +41,7 @@ func GetS3Client(opt OpenOption) (*S3Client, error) {
 	}
 	_, err = client.HeadBucket(testBucket)
 	if err != nil {
-		//try create
-		createBucket := &s3.CreateBucketInput{
-			Bucket: aws.String(opt.Bucket),
-		}
-		_, err = client.CreateBucket(createBucket)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	opt.Path = path.Clean(opt.Path)
 	return &S3Client{s3Store: client, opt: opt}, nil
